@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { SendHorizontal, X, Image, Mic, Shield, Key, FileText, Settings } from 'lucide-react';
+import { SendHorizontal, X, Image, Mic, Shield, Key, FileText, Settings, Eye, EyeOff } from 'lucide-react';
 import { useChat } from '../context/ChatContext';
 import { useCrypto } from '../context/CryptoContext';
 import MessageList from './MessageList';
@@ -20,6 +20,7 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ onLeave }) => {
   const [showDocumentSigner, setShowDocumentSigner] = useState(false);
   const [showCertInfo, setShowCertInfo] = useState(false);
   const [audioError, setAudioError] = useState<string>('');
+  const [microphonePermission, setMicrophonePermission] = useState<'granted' | 'denied' | 'prompt' | 'unknown'>('unknown');
   
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioStreamRef = useRef<MediaStream | null>(null);
@@ -31,6 +32,27 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ onLeave }) => {
   useEffect(() => {
     messageEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  // Check microphone permission on mount
+  useEffect(() => {
+    const checkMicrophonePermission = async () => {
+      try {
+        if (navigator.permissions) {
+          const permission = await navigator.permissions.query({ name: 'microphone' as PermissionName });
+          setMicrophonePermission(permission.state);
+          
+          permission.onchange = () => {
+            setMicrophonePermission(permission.state);
+          };
+        }
+      } catch (error) {
+        console.log('Permission API not supported');
+        setMicrophonePermission('unknown');
+      }
+    };
+
+    checkMicrophonePermission();
+  }, []);
 
   useEffect(() => {
     if (isRecording) {
@@ -58,6 +80,52 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ onLeave }) => {
 
   const formatDate = (timestamp: number) => {
     return new Date(timestamp).toLocaleString();
+  };
+
+  const requestMicrophonePermission = async (): Promise<boolean> => {
+    try {
+      setAudioError('');
+      
+      // First, explicitly request permission
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          sampleRate: 44100
+        } 
+      });
+      
+      // If we get here, permission was granted
+      setMicrophonePermission('granted');
+      
+      // Stop the stream immediately as we just wanted permission
+      stream.getTracks().forEach(track => track.stop());
+      
+      return true;
+    } catch (error) {
+      console.error('Microphone permission denied:', error);
+      
+      let errorMessage = 'Microphone access required for audio messages. ';
+      
+      if (error instanceof Error) {
+        if (error.name === 'NotAllowedError') {
+          setMicrophonePermission('denied');
+          errorMessage += 'Please click the microphone icon in your browser\'s address bar and allow access, then try again.';
+        } else if (error.name === 'NotFoundError') {
+          errorMessage += 'No microphone found. Please connect a microphone and try again.';
+        } else if (error.name === 'NotSupportedError') {
+          errorMessage += 'Audio recording is not supported in this browser.';
+        } else if (error.name === 'NotReadableError') {
+          errorMessage += 'Microphone is already in use by another application.';
+        } else {
+          errorMessage += 'Please check your microphone settings and try again.';
+        }
+      }
+      
+      setAudioError(errorMessage);
+      return false;
+    }
   };
 
   const handleSendMessage = async () => {
@@ -98,6 +166,14 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ onLeave }) => {
 
   const startRecording = async () => {
     if (!isPaired) return;
+    
+    // Check if we need to request permission first
+    if (microphonePermission !== 'granted') {
+      const hasPermission = await requestMicrophonePermission();
+      if (!hasPermission) {
+        return;
+      }
+    }
     
     try {
       setAudioError('');
@@ -215,6 +291,7 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ onLeave }) => {
       
       if (error instanceof Error) {
         if (error.name === 'NotAllowedError') {
+          setMicrophonePermission('denied');
           errorMessage += 'Please allow microphone access in your browser settings and try again.';
         } else if (error.name === 'NotFoundError') {
           errorMessage += 'No microphone found. Please connect a microphone and try again.';
@@ -298,13 +375,27 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ onLeave }) => {
               <h3 className="text-lg font-semibold text-red-400">Audio Error</h3>
             </div>
             <p className="text-gray-300 mb-6">{audioError}</p>
-            <Button
-              onClick={() => setAudioError('')}
-              variant="secondary"
-              className="w-full"
-            >
-              Close
-            </Button>
+            <div className="flex space-x-3">
+              <Button
+                onClick={() => setAudioError('')}
+                variant="secondary"
+                className="flex-1"
+              >
+                Close
+              </Button>
+              {microphonePermission === 'denied' && (
+                <Button
+                  onClick={() => {
+                    setAudioError('');
+                    // Open browser settings help
+                    window.open('https://support.google.com/chrome/answer/2693767', '_blank');
+                  }}
+                  className="flex-1"
+                >
+                  Help
+                </Button>
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -317,13 +408,16 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ onLeave }) => {
             <span className="font-medium">{isPaired ? 'Connected' : 'Waiting for Connection'}</span>
           </div>
           {pairingCode && (
-            <button
-              onClick={() => setShowCode(!showCode)}
-              className="flex items-center space-x-2 px-3 py-1 bg-gray-700 rounded-full text-sm hover:bg-gray-600 transition-colors"
-            >
-              <Key className="w-4 h-4" />
-              <span>{showCode ? pairingCode : '••••••'}</span>
-            </button>
+            <div className="flex items-center space-x-2">
+              <button
+                onClick={() => setShowCode(!showCode)}
+                className="flex items-center space-x-2 px-3 py-1 bg-gray-700 rounded-full text-sm hover:bg-gray-600 transition-colors"
+              >
+                <Key className="w-4 h-4" />
+                <span>{showCode ? pairingCode : '••••••'}</span>
+                {showCode ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+              </button>
+            </div>
           )}
           {certificate && (
             <button
@@ -448,16 +542,24 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ onLeave }) => {
               <button
                 onClick={handleAudioRecording}
                 className={`relative ${
-                  isRecording ? 'text-red-500 animate-pulse' : 'text-gray-400 hover:text-white'
+                  isRecording ? 'text-red-500 animate-pulse' : 
+                  microphonePermission === 'denied' ? 'text-red-400' :
+                  'text-gray-400 hover:text-white'
                 } transition-colors ${!isPaired && 'opacity-50 cursor-not-allowed'}`}
                 disabled={!isPaired}
-                title={isRecording ? 'Stop Recording' : 'Record Audio'}
+                title={
+                  microphonePermission === 'denied' ? 'Microphone access denied - click for help' :
+                  isRecording ? 'Stop Recording' : 'Record Audio'
+                }
               >
                 <Mic className="w-5 h-5" />
                 {isRecording && (
                   <span className="absolute -top-8 left-1/2 transform -translate-x-1/2 bg-red-600 text-white px-2 py-1 rounded text-xs">
                     {formatTime(recordingTime)}
                   </span>
+                )}
+                {microphonePermission === 'denied' && (
+                  <span className="absolute -top-1 -right-1 w-3 h-3 bg-red-500 rounded-full"></span>
                 )}
               </button>
               <div className="flex-1 text-right">
