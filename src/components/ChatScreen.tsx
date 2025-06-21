@@ -3,7 +3,7 @@ import { SendHorizontal, X, Image, Mic, Shield, Key, FileText, Settings } from '
 import { useChat } from '../context/ChatContext';
 import { useCrypto } from '../context/CryptoContext';
 import MessageList from './MessageList';
-import DocumentSigner from './DocumentSigner';
+import SimpleDocumentSigner from './SimpleDocumentSigner';
 import Button from './ui/Button';
 
 interface ChatScreenProps {
@@ -74,7 +74,8 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ onLeave }) => {
     const file = e.target.files?.[0];
     if (!file || !isPaired) return;
 
-    if (file.size > 1024 * 1024) {
+    if (file.size > 5 * 1024 * 1024) { // 5MB limit
+      setAudioError('Image file too large. Please choose a file under 5MB.');
       return;
     }
 
@@ -87,6 +88,7 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ onLeave }) => {
       reader.readAsDataURL(file);
     } catch (error) {
       console.error('Failed to upload image:', error);
+      setAudioError('Failed to upload image. Please try again.');
     } finally {
       if (fileInputRef.current) {
         fileInputRef.current.value = '';
@@ -100,81 +102,128 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ onLeave }) => {
     try {
       setAudioError('');
       
+      // Request microphone access with better error handling
       const stream = await navigator.mediaDevices.getUserMedia({ 
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
-          autoGainControl: true
+          autoGainControl: true,
+          sampleRate: 44100
         } 
       });
       
       audioStreamRef.current = stream;
       audioChunksRef.current = [];
       
-      // Simple MIME type selection
-      let mimeType = 'audio/webm';
-      if (!MediaRecorder.isTypeSupported('audio/webm')) {
-        if (MediaRecorder.isTypeSupported('audio/mp4')) {
-          mimeType = 'audio/mp4';
-        } else if (MediaRecorder.isTypeSupported('audio/ogg')) {
-          mimeType = 'audio/ogg';
+      // Check for supported MIME types in order of preference
+      const supportedTypes = [
+        'audio/webm;codecs=opus',
+        'audio/webm',
+        'audio/mp4',
+        'audio/ogg;codecs=opus',
+        'audio/ogg',
+        'audio/wav'
+      ];
+      
+      let mimeType = 'audio/webm'; // fallback
+      for (const type of supportedTypes) {
+        if (MediaRecorder.isTypeSupported(type)) {
+          mimeType = type;
+          break;
         }
       }
 
-      const recorder = new MediaRecorder(stream, { mimeType });
+      console.log('Using MIME type:', mimeType);
+
+      const recorder = new MediaRecorder(stream, { 
+        mimeType,
+        audioBitsPerSecond: 128000 // 128 kbps
+      });
+      
       mediaRecorderRef.current = recorder;
 
       recorder.ondataavailable = (event) => {
+        console.log('Data available:', event.data.size, 'bytes');
         if (event.data && event.data.size > 0) {
           audioChunksRef.current.push(event.data);
         }
       };
 
-      recorder.onstop = () => {
+      recorder.onstop = async () => {
+        console.log('Recording stopped, chunks:', audioChunksRef.current.length);
+        
         if (audioChunksRef.current.length > 0) {
           const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
+          console.log('Created blob:', audioBlob.size, 'bytes');
           
-          const reader = new FileReader();
-          reader.onload = async (e) => {
-            const audioDataUrl = e.target?.result as string;
-            if (audioDataUrl && isPaired) {
-              try {
-                await sendMessage(audioDataUrl, 'audio');
-              } catch (error) {
-                console.error('Failed to send audio:', error);
+          if (audioBlob.size > 0) {
+            const reader = new FileReader();
+            reader.onload = async (e) => {
+              const audioDataUrl = e.target?.result as string;
+              if (audioDataUrl && isPaired) {
+                try {
+                  console.log('Sending audio message...');
+                  await sendMessage(audioDataUrl, 'audio');
+                } catch (error) {
+                  console.error('Failed to send audio:', error);
+                  setAudioError('Failed to send audio message. Please try again.');
+                }
               }
-            }
-          };
-          reader.readAsDataURL(audioBlob);
+            };
+            reader.onerror = () => {
+              console.error('FileReader error');
+              setAudioError('Failed to process audio recording.');
+            };
+            reader.readAsDataURL(audioBlob);
+          } else {
+            setAudioError('Recording failed - no audio data captured.');
+          }
+        } else {
+          setAudioError('Recording failed - no audio data available.');
         }
         
         // Cleanup
         if (audioStreamRef.current) {
-          audioStreamRef.current.getTracks().forEach(track => track.stop());
+          audioStreamRef.current.getTracks().forEach(track => {
+            track.stop();
+            console.log('Stopped track:', track.kind);
+          });
           audioStreamRef.current = null;
         }
         setIsRecording(false);
         audioChunksRef.current = [];
       };
 
-      recorder.onerror = () => {
+      recorder.onerror = (event) => {
+        console.error('MediaRecorder error:', event);
         stopRecording();
-        setAudioError('Recording failed. Please try again.');
+        setAudioError('Recording failed due to an error. Please try again.');
       };
 
-      recorder.start();
+      recorder.onstart = () => {
+        console.log('Recording started');
+      };
+
+      // Start recording with data collection every second
+      recorder.start(1000);
       setIsRecording(true);
       
     } catch (error) {
+      console.error('Failed to start recording:', error);
+      
       let errorMessage = 'Could not access microphone. ';
       
       if (error instanceof Error) {
         if (error.name === 'NotAllowedError') {
-          errorMessage += 'Please allow microphone access and try again.';
+          errorMessage += 'Please allow microphone access in your browser settings and try again.';
         } else if (error.name === 'NotFoundError') {
-          errorMessage += 'No microphone found.';
+          errorMessage += 'No microphone found. Please connect a microphone and try again.';
+        } else if (error.name === 'NotSupportedError') {
+          errorMessage += 'Audio recording is not supported in this browser.';
+        } else if (error.name === 'NotReadableError') {
+          errorMessage += 'Microphone is already in use by another application.';
         } else {
-          errorMessage += 'Please check your microphone settings.';
+          errorMessage += 'Please check your microphone settings and try again.';
         }
       }
       
@@ -184,8 +233,12 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ onLeave }) => {
   };
 
   const stopRecording = () => {
+    console.log('Stopping recording...');
     if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
       mediaRecorderRef.current.stop();
+    }
+    if (audioStreamRef.current) {
+      audioStreamRef.current.getTracks().forEach(track => track.stop());
     }
   };
 
@@ -228,7 +281,7 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ onLeave }) => {
               <X className="w-5 h-5" />
             </button>
           </div>
-          <DocumentSigner />
+          <SimpleDocumentSigner />
         </div>
       </div>
     );
@@ -242,7 +295,7 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ onLeave }) => {
           <div className="bg-gray-800 rounded-lg p-6 max-w-md mx-4">
             <div className="flex items-center space-x-3 mb-4">
               <X className="w-6 h-6 text-red-400" />
-              <h3 className="text-lg font-semibold text-red-400">Audio Recording Error</h3>
+              <h3 className="text-lg font-semibold text-red-400">Audio Error</h3>
             </div>
             <p className="text-gray-300 mb-6">{audioError}</p>
             <Button
